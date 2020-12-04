@@ -116,6 +116,11 @@ At the moment, these options are implemented:
 
 **-v/-h**: Displays short help and version information.
 
+**-x**: Set display width
+
+**-y**: Set display height
+
+**-z**: Set display framerate(Added #define, adding support for start arg.)
 
 # Disclaimer
 
