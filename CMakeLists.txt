@@ -9,4 +9,5 @@ add_subdirectory(lib)
 add_subdirectory(renderers)
 
 add_executable( rpiplay rpiplay.cpp)
-target_link_libraries ( rpiplay renderers airplay )
+target_include_directories(rpiplay PUBLIC /usr/include/libcec)
+target_link_libraries ( rpiplay renderers airplay dl)

@@ -287,6 +287,7 @@ raop_init(int max_clients, raop_callbacks_t *callbacks)
 	httpd_cbs.conn_init = &conn_init;
 	httpd_cbs.conn_request = &conn_request;
 	httpd_cbs.conn_destroy = &conn_destroy;
+	httpd_cbs.cec_callback = callbacks->cec_callback;
 
 	/* Initialize the http daemon */
 	httpd = httpd_init(raop->logger, &httpd_cbs, max_clients);

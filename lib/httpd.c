@@ -124,6 +124,8 @@ httpd_add_connection(httpd_t *httpd, int fd, unsigned char *local, int local_len
 	httpd->connections[i].socket_fd = fd;
 	httpd->connections[i].connected = 1;
 	httpd->connections[i].user_data = user_data;
+	logger_log(httpd->logger, LOGGER_INFO, "Calling CEC");
+    httpd->callbacks.cec_callback(1);
 	return 0;
 }
 
@@ -164,6 +166,7 @@ httpd_accept_connection(httpd_t *httpd, int server_fd, int is_ipv6)
 		closesocket(fd);
 		return 0;
 	}
+	httpd->callbacks.cec_callback(1);
 	return 1;
 }
 
@@ -179,6 +182,7 @@ httpd_remove_connection(httpd_t *httpd, http_connection_t *connection)
 	closesocket(connection->socket_fd);
 	connection->connected = 0;
 	httpd->open_connections--;
+	httpd->callbacks.cec_callback(2);
 }
 
 static THREAD_RETVAL
@@ -366,7 +370,7 @@ httpd_thread(void *arg)
     MUTEX_UNLOCK(httpd->run_mutex);
 
 	logger_log(httpd->logger, LOGGER_DEBUG, "Exiting HTTP thread");
-
+	httpd->callbacks.cec_callback(2);
 	return 0;
 }
 
