@@ -19,11 +19,13 @@
 
 #include <stddef.h>
 #include <cstring>
+#include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
 #include <string>
 #include <vector>
 #include <fstream>
+#include <iostream>
 
 #include "log.h"
 #include "lib/raop.h"
@@ -32,6 +34,10 @@
 #include "lib/dnssd.h"
 #include "renderers/video_renderer.h"
 #include "renderers/audio_renderer.h"
+#include <cec.h>
+
+#include <cecloader.h>
+#include <cectypes.h>
 
 #define VERSION "1.2"
 
@@ -42,10 +48,11 @@
 #define DEFAULT_DEBUG_LOG false
 #define DEFAULT_ROTATE 0
 #define DEFAULT_FLIP FLIP_NONE
+#define DEFAULT_CEC_CONTROL true
 #define DEFAULT_HW_ADDRESS { (char) 0x48, (char) 0x5d, (char) 0x60, (char) 0x7c, (char) 0xee, (char) 0x22 }
 
 int start_server(std::vector<char> hw_addr, std::string name, bool debug_log,
-                 video_renderer_config_t const *video_config, audio_renderer_config_t const *audio_config);
+                 video_renderer_config_t const *video_config, audio_renderer_config_t const *audio_config, bool cec_control);
 
 int stop_server();
 
@@ -72,6 +79,19 @@ static audio_init_func_t audio_init_func = NULL;
 static video_renderer_t *video_renderer = NULL;
 static audio_renderer_t *audio_renderer = NULL;
 static logger_t *render_logger = NULL;
+CEC::ICECCallbacks         g_callbacks;
+CEC::libcec_configuration  g_config;
+int                   g_cecLogLevel(-1);
+int                   g_cecDefaultLogLevel(CEC::CEC_LOG_ALL);
+std::ofstream         g_logOutput;
+std::string           g_strPort;
+bool                  g_bShortLog(false);
+bool                  g_bSingleCommand(false);
+volatile sig_atomic_t g_bExit(0);
+bool                  g_bHardExit(false);
+bool                  cec_control = true;
+bool                  cec_setup_success = false;
+CEC::ICECAdapter*          g_parser;
 
 static const video_renderer_list_entry_t video_renderers[] = {
 #if defined(HAS_RPI_RENDERER)
@@ -96,6 +116,11 @@ static const audio_renderer_list_entry_t audio_renderers[] = {
     {"dummy", "Dummy renderer; does not actually play audio", audio_renderer_dummy_init},
 #endif
 };
+int                   g_cecLogLevel(-1);
+int                   g_cecDefaultLogLevel(CEC::CEC_LOG_ALL);
+bool                  cec_control = true;
+bool                  cec_setup_success = false;
+CEC::ICECAdapter*          g_parser;
 
 static void signal_handler(int sig) {
     switch (sig) {
@@ -172,6 +197,7 @@ void print_info(char *name) {
     for (int i = 0; i < sizeof(audio_renderers)/sizeof(audio_renderers[0]); i++) {
         printf("    %s: %s%s\n", audio_renderers[i].name, audio_renderers[i].description, i == 0 ? " [Default]" : "");
     }
+    printf("-c                    disables automatic CEC control\n");
     printf("-d                    Enable debug logging\n");
     printf("-v/-h                 Displays this help and version information\n");
 }
@@ -254,6 +280,8 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: Unable to locate audio renderer \"%s\".\n", argv[i]);
                 exit(1);
             }
+        } else if (arg == "-c") {
+            cec_control = !cec_control;
         } else if (arg == "-h" || arg == "-v") {
             print_info(argv[0]);
             exit(0);
@@ -266,7 +294,7 @@ int main(int argc, char *argv[]) {
         parse_hw_addr(mac_address, server_hw_addr);
     }
 
-    if (start_server(server_hw_addr, server_name, debug_log, &video_config, &audio_config) != 0) {
+    if (start_server(server_hw_addr, server_name, debug_log, &video_config, &audio_config, cec_control) != 0) {
         return 1;
     }
 
@@ -313,6 +341,16 @@ extern "C" void audio_set_volume(void *cls, float volume) {
         audio_renderer->funcs->set_volume(audio_renderer, volume);
     }
 }
+extern "C" void cec_controller(int opt) {
+    if (cec_control && cec_setup_success) {
+        if (opt == 1) {
+            g_parser->PowerOnDevices((CEC::cec_logical_address) 0);
+            g_parser->SetActiveSource();
+        } else if (opt == 2) {
+            g_parser->StandbyDevices((CEC::cec_logical_address) 0);
+        }
+    }
+}
 
 extern "C" void log_callback(void *cls, int level, const char *msg) {
     switch (level) {
@@ -335,11 +373,62 @@ extern "C" void log_callback(void *cls, int level, const char *msg) {
         default:
             break;
     }
+}
+int setup_cec(std::string name) {
+    g_config.Clear();
+    g_callbacks.Clear();
+    g_config.clientVersion      = CEC::LIBCEC_VERSION_CURRENT;
+    g_config.bActivateSource    = 0;
+    g_config.callbacks          = &g_callbacks;
 
+    g_config.deviceTypes.Add(CEC::CEC_DEVICE_TYPE_RECORDING_DEVICE);
+
+    g_parser = LibCecInitialise(&g_config);
+    if (!g_parser) {
+#ifdef __WINDOWS__
+        std::cout << "Cannot load cec.dll" << std::endl;
+#endif
+
+        if (g_parser)
+            UnloadLibCec(g_parser);
+            LOGE("Other failure");
+        return 1;
+    }
+    g_parser->InitVideoStandalone();
+#ifndef __WINDOWS__
+    int flags = fcntl(0, F_GETFL, 0);
+    flags |= O_NONBLOCK;
+    fcntl(0, F_SETFL, flags);
+#endif
+
+    if (g_strPort.empty())
+    {
+        CEC::cec_adapter_descriptor devices[10];
+        uint8_t iDevicesFound = g_parser->DetectAdapters(devices, 10, NULL, true);
+        if (iDevicesFound <= 0)
+        {
+            if (g_bSingleCommand)
+            UnloadLibCec(g_parser);
+            LOGE("No Found Devices");
+            return 1;
+        }
+        else
+        {
+            g_strPort = devices[0].strComName;
+        }
+        if (!g_parser->Open(g_strPort.c_str()))
+        {
+            UnloadLibCec(g_parser);
+            LOGE("Cannot Open Serial Port: %s \n", g_strPort.c_str());
+            return 1;
+        }
+
+    }
+    return 0;
 }
 
 int start_server(std::vector<char> hw_addr, std::string name, bool debug_log,
-                 video_renderer_config_t const *video_config, audio_renderer_config_t const *audio_config) {
+                 video_renderer_config_t const *video_config, audio_renderer_config_t const *audio_config, bool cec_control) {
     raop_callbacks_t raop_cbs;
     memset(&raop_cbs, 0, sizeof(raop_cbs));
     raop_cbs.conn_init = conn_init;
@@ -349,6 +438,7 @@ int start_server(std::vector<char> hw_addr, std::string name, bool debug_log,
     raop_cbs.audio_flush = audio_flush;
     raop_cbs.video_flush = video_flush;
     raop_cbs.audio_set_volume = audio_set_volume;
+    raop_cbs.cec_callback = cec_controller;
 
     raop = raop_init(10, &raop_cbs);
     if (raop == NULL) {
@@ -368,6 +458,13 @@ int start_server(std::vector<char> hw_addr, std::string name, bool debug_log,
     if ((video_renderer = video_init_func(render_logger, video_config)) == NULL) {
         LOGE("Could not init video renderer");
         return -1;
+    }
+    if (cec_control) {
+        cec_setup_success = !setup_cec(name);
+        LOGI("CEC setup success: %d", cec_setup_success);
+        if (cec_setup_success) {
+            g_parser->StandbyDevices((CEC::cec_logical_address) 0);
+        }
     }
 
     if (audio_config->device == AUDIO_DEVICE_NONE) {
@@ -408,5 +505,10 @@ int stop_server() {
     if (audio_renderer) audio_renderer->funcs->destroy(audio_renderer);
     if (video_renderer) video_renderer->funcs->destroy(video_renderer);
     logger_destroy(render_logger);
+    if (cec_control && cec_setup_success) {
+        g_parser->StandbyDevices((CEC::cec_logical_address) 0);
+        g_parser->Close();
+        UnloadLibCec(g_parser);
+    }
     return 0;
 }

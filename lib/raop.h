@@ -47,6 +47,7 @@ struct raop_callbacks_s {
     void  (*audio_set_coverart)(void *cls, const void *buffer, int buflen);
     void  (*audio_remote_control_id)(void *cls, const char *dacp_id, const char *active_remote_header);
     void  (*audio_set_progress)(void *cls, unsigned int start, unsigned int curr, unsigned int end);
+    void  (*cec_callback)(int);
 };
 typedef struct raop_callbacks_s raop_callbacks_t;
 
